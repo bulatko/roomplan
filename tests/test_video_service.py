@@ -163,6 +163,13 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(lengths,[1.8,2.0,3.8])  # A|B, A|C (each <= 2 m) and B|C (3.84 m)
         self.assertTrue(any('Без прохода к соседним помещениям: Помещение 1, Помещение 2, Помещение 3' in x for x in w))
 
+    def test_kept_result_has_no_machine_paths(self):
+        result=synthetic_result();result['meta'].update(detector={'config':'/mnt/vol/ckpt/run01/cfg.py','ckpt':'/mnt/vol/ckpt/run01/epoch_12.pth'},pipeline={'work':'/mnt/vol/jobs/J/work/'})
+        p,_=result_to_project(result)
+        kept=base64.b64decode(p['assets'][0]['data']).decode()
+        self.assertNotIn('/mnt/',kept);self.assertIn('"epoch_12.pth"',kept);self.assertIn('"work"',kept)
+        self.assertNotIn('/mnt/',json.dumps(p['provenance']))
+
     def test_rejects_results_without_walls(self):
         for bad in [{},{'walls':[]},{'walls':[{'a':[0,'x'],'b':[1,1]}]}]:
             with self.assertRaises(ValueError): result_to_project(bad)

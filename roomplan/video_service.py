@@ -203,6 +203,14 @@ def read_ply(raw):
     arr=np.frombuffer(body,dtype=dtype,count=n)
     return np.stack([arr['x'],arr['y'],arr['z']],1).astype(np.float32)
 
+def strip_paths(value):
+    """Absolute paths -> file names. Older service results carry machine paths (weights, job dirs) in meta;
+    they must not travel inside shared projects."""
+    if isinstance(value,dict): return {k:strip_paths(v) for k,v in value.items()}
+    if isinstance(value,list): return [strip_paths(v) for v in value]
+    if isinstance(value,str) and value.startswith('/') and '/' in value[1:] and not re.search(r'\s',value): return value.rstrip('/').rsplit('/',1)[-1]
+    return value
+
 def _num(value,default=0.):
     return float(value) if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) else default
 
@@ -474,5 +482,5 @@ def result_to_project(result,cloud=None,job_id='',video_name='video'):
     p['provenance']={'mode':'video','method':METHOD,'isSynthetic':False,'inputUsedForGeometry':True,
         'service':{'job':job_id,'areaM2':meta.get('area_m2'),'wallsDecoder':meta.get('walls_decoder'),'pipeline':pipeline.get('selected') or pipeline.get('pipeline'),'quality':quality.get('status'),'redGates':red,'scaleSource':scale.get('source'),'frames':meta.get('frames'),'points':meta.get('points')},
         'alignment':{'sourceFrame':'metres, Z up, plan x-y (service result)','rotationRad':round(phi,6),'floorZ':round(floor,4),'floorSource':level_source,'offset':[round(ox,4),round(oz,4)],'mapping':'x=(R(-rotation)*[x,y])_x-offset0; z=-(R(-rotation)*[x,y])_y-offset1; y=z-floorZ'}}
-    p['assets'].append({'id':str(uuid.uuid4()),'name':'roomplan-result.json','mime':'application/json','data':base64.b64encode(json.dumps(result,ensure_ascii=False).encode()).decode()})
+    p['assets'].append({'id':str(uuid.uuid4()),'name':'roomplan-result.json','mime':'application/json','data':base64.b64encode(json.dumps(strip_paths(result),ensure_ascii=False).encode()).decode()})
     return p,warnings
