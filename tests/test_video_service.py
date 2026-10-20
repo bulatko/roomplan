@@ -13,7 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
+from roomplan import scenes
 from roomplan.model import validate_project
+try: from test_scenes import make_bundle            # unittest discover -s tests
+except ImportError: from tests.test_scenes import make_bundle
 from roomplan.providers import health
 from roomplan.video_service import DEFAULT_THICKNESS, dominant_angle, floor_ceiling, public_job, read_ply, result_to_project
 from server import Handler, load_env
@@ -179,7 +182,7 @@ class ConverterTests(unittest.TestCase):
 
 class FakeService(BaseHTTPRequestHandler):
     """Minimal roomplan-app API: queued -> running -> done (or failed)."""
-    token='secret';jobs={};uploads=[]
+    token='secret';jobs={};uploads=[];scene_downloads=0
     def log_message(self,*args): pass
     def send(self,status,body,mime='application/json'):
         data=body if isinstance(body,bytes) else json.dumps(body).encode()
@@ -203,11 +206,13 @@ class FakeService(BaseHTTPRequestHandler):
         if m.group(2):
             if m.group(2)=='result.json': return self.send(200,synthetic_result())
             if m.group(2)=='cloud.ply': return self.send(200,ply_binary(synthetic_cloud()[::4]),'application/octet-stream')
+            if m.group(2)=='scene.tar.gz':
+                FakeService.scene_downloads+=1;return self.send(200,make_bundle(top=f'scene_{job["id"]}'),'application/gzip')
             return self.send(404,{'detail':'no such file'})
         job['polls']+=1
         if job['id'].endswith('fail00'): job.update(status='failed',stage='beam_rec',error='poses: too few frames')
         elif job['polls']==1: job.update(status='running',stage='beam_rec',message='VGGT')
-        else: job.update(status='done',stage='done',files=['bev.png','cloud.ply','result.json'])
+        else: job.update(status='done',stage='done',files=['bev.png','cloud.ply','result.json','scene.tar.gz'])
         self.send(200,{k:v for k,v in job.items() if k!='polls'})
 
 def request(url,payload=None):
@@ -223,11 +228,14 @@ class VideoAPITests(unittest.TestCase):
         for handler in (FakeService,Handler):
             server=ThreadingHTTPServer(('127.0.0.1',0),handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();cls.servers.append((server,thread))
         cls.service=f'http://127.0.0.1:{cls.servers[0][0].server_port}';cls.url=f'http://127.0.0.1:{cls.servers[1][0].server_port}'
+        cls.data=tempfile.TemporaryDirectory()
     @classmethod
     def tearDownClass(cls):
         for server,thread in cls.servers: server.shutdown();server.server_close();thread.join()
+        cls.data.cleanup()
     def env(self,**kw):
-        values={'ROOMPLAN_VIDEO_API_URL':self.service,'ROOMPLAN_VIDEO_API_TOKEN':'secret','ROOMPLAN_VIDEO_API_OPTIONS':'{"beam_rec":{"target_frames":200}}'};values.update(kw)
+        values={'ROOMPLAN_VIDEO_API_URL':self.service,'ROOMPLAN_VIDEO_API_TOKEN':'secret','ROOMPLAN_VIDEO_API_OPTIONS':'{"beam_rec":{"target_frames":200}}',
+                'ROOMPLAN_DATA_DIR':self.data.name};values.update(kw)
         return patch.dict(os.environ,{k:v for k,v in values.items() if v is not None},clear=False)
     def video(self,name='room.mp4'): return {'files':[{'name':name,'mime':'video/mp4','data':base64.b64encode(b'\x00\x00\x00\x18ftypmp42video-bytes').decode()}]}
 
@@ -245,6 +253,10 @@ class VideoAPITests(unittest.TestCase):
             p=data['project'];self.assertEqual(p['name'],'План по видео · Комната 1');self.assertEqual(len(p['walls']),4)
             self.assertEqual(p['provenance']['service']['job'],job['id']);self.assertEqual(p['provenance']['alignment']['floorSource'],'cloud-density-peaks')
             self.assertTrue(p['pointCloud']);validate_project(p)
+            # Scene bundle went to the shared space, referenced by the project; a repeated poll does not fetch it again.
+            self.assertEqual((p['scenes'][0]['id'],p['scenes'][0]['frames'],p['scenes'][0]['source']['job']),(job['id'],2,job['id']))
+            self.assertTrue(scenes.bundle_path(job['id']).is_file());self.assertEqual(FakeService.scene_downloads,1)
+            request(self.url+'/api/reconstruct/video/'+job['id']);self.assertEqual(FakeService.scene_downloads,1)
 
     def test_failed_job_is_reported_without_project(self):
         with self.env():

@@ -8,3 +8,4 @@ artifacts/private/
 artifacts/*.tgz
 artifacts/dependency-archives/
 .env
+data/

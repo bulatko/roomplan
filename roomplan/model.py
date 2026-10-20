@@ -3,6 +3,7 @@ import copy
 import math
 import re
 from .research import validate_research_layers
+from .scenes import validate_scene_refs
 
 MAX_BLOB = 100 * 1024 * 1024
 MAX_TOTAL = 250 * 1024 * 1024
@@ -178,6 +179,7 @@ def validate_project(project):
     if sum(len(f['data']) for k in ['sources','assets'] for f in p[k])>MAX_TOTAL*1.34: raise ValueError('Проект превышает 250 МБ')
     asset_ids={f.get('id') for f in p['assets']}
     validate_research_layers(p.get('researchLayers', []), {f['id'] for f in p['sources']}, asset_ids)
+    if 'scenes' in p: validate_scene_refs(p['scenes'])
     for o in p['objects']:
         if o.get('assetId') and o['assetId'] not in asset_ids: raise ValueError('У объекта отсутствует ресурс assetId')
     if not isinstance(p.get('layers',{}),dict) or not isinstance(p.get('provenance',{}),dict): raise ValueError('Неверные метаданные проекта')

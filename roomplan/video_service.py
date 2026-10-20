@@ -23,6 +23,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import numpy as np
+from . import scenes
 from .model import CATALOG, validate_files
 from .providers import ProviderUnavailable
 
@@ -134,6 +135,14 @@ def poll_video(job_id):
     video=job.get('video') if isinstance(job.get('video'),dict) else {}
     project,warnings=result_to_project(result,cloud,job_id=job_id,video_name=str(video.get('name') or 'video'))
     if 'cloud.ply' in names and cloud is None: warnings.append('Облако точек не прочитано: слой облака пуст.')
+    # Scene bundle (posed frames + cloud + plan) goes to the shared server space for the next functions.
+    if 'scene.tar.gz' in names:
+        try:
+            info=scenes.summary(job_id) or scenes.store_bundle(job_id,_call(f'/api/jobs/{urllib.parse.quote(job_id)}/files/scene.tar.gz',timeout=900,limit=scenes.MAX_BUNDLE),
+                                                               source={'service':'roomplan-app','job':job_id,'video':video.get('name')})
+            project['scenes']=[info]
+            if info.get('checksOk') is False: warnings.append('Самопроверка пакета сцены не пройдена: позы кадров и облако могут не совпадать.')
+        except (ValueError,ProviderUnavailable) as e: warnings.append(f'Пакет сцены не получен: {e}')
     out.update(project=project,warnings=warnings)
     return out
 

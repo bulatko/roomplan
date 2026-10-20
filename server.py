@@ -13,6 +13,8 @@ from roomplan.export import export_svg
 from roomplan.providers import health, reconstruct_object, ProviderUnavailable
 from roomplan.video import encode_walkthrough
 from roomplan.video_service import poll_video, submit_video
+from roomplan import scenes
+from roomplan.functions import detect
 
 ROOT=Path(__file__).resolve().parent
 MAX_REQUEST=360*1024*1024
@@ -50,6 +52,15 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError,KeyError,TypeError,OverflowError) as e: return self.reply(400,{'error':str(e)})
             except Exception as e:
                 self.log_error('%s',e);return self.reply(500,{'error':'Ошибка обработки. Подробности в локальном журнале сервера.'})
+        if path.startswith('/api/scenes/'):
+            parts=path.removeprefix('/api/scenes/').split('/')
+            try:
+                scenes.scene_dir(parts[0])  # 400 on a malformed id before anything else
+                if len(parts)==1 and (info:=scenes.summary(parts[0])): return self.reply(200,info)
+                if len(parts)==2 and parts[1]=='bundle' and scenes.summary(parts[0]):
+                    return self.reply(200,scenes.bundle_path(parts[0]).read_bytes(),'application/gzip',f'scene_{parts[0]}.tar.gz')
+                return self.reply(404,{'error':'Сцена не найдена'})
+            except ValueError as e: return self.reply(400,{'error':str(e)})
         if path.startswith('/api/'): return self.reply(404,{'error':'Неизвестный API маршрут'})
         if path=='/': candidate=ROOT/'web'/'index.html'
         elif path in ['/progress','/progress/']: candidate=ROOT/'web'/'progress.html'
@@ -78,6 +89,7 @@ class Handler(BaseHTTPRequestHandler):
                 p,w=reconstruct(payload);p,v=validate_project(p);return self.reply(200,{'project':p,'warnings':w+v})
             if path=='/api/reconstruct/object': return self.reply(200,reconstruct_object(payload))
             if path=='/api/reconstruct/video': return self.reply(200,submit_video(payload))
+            if path.startswith('/api/scenes/') and path.endswith('/detect'): return self.reply(200,detect(path.removeprefix('/api/scenes/').removesuffix('/detect')))
             if path=='/api/validate':
                 p,w=validate_project(payload.get('project'));return self.reply(200,{'project':p,'warnings':w})
             if path=='/api/export/project': return self.reply(200,save_project(payload.get('project')),'application/zip','roomplan-project.zip')

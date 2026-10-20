@@ -4,6 +4,7 @@ import io
 import json
 import re
 import zipfile
+from . import scenes
 from .model import MAX_TOTAL, validate_project
 
 def save_project(project):
@@ -14,6 +15,10 @@ def save_project(project):
                 safe=re.sub(r'[^\w.\-]','_',f['name'])[:150] or 'file'
                 path=f'{kind}/{index:03d}-{safe}'
                 z.writestr(path,base64.b64decode(f.pop('data')));f['archivePath']=path
+        for s in p.get('scenes',[]):  # bundles live on the server; the portable project carries them along
+            bundle=scenes.bundle_path(s['id'])
+            if bundle.is_file():
+                path=f'scenes/{s["id"]}.tar.gz';z.write(bundle,path,compress_type=zipfile.ZIP_STORED);s['archivePath']=path
         z.writestr('project.json',json.dumps(p,ensure_ascii=False,allow_nan=False,indent=2))
         z.writestr('README.txt','RoomPlan portable project v1. project.json contains metric geometry and paths to every original source and generated asset. Files are never executable. Open the ZIP in RoomPlan to continue editing.\n')
     return out.getvalue()
@@ -35,6 +40,12 @@ def load_project(data):
                     if path:
                         if not path.startswith(kind+'/'): raise ValueError('Неверная ссылка на ресурс')
                         f['data']=base64.b64encode(z.read(path)).decode()
+            scenes.validate_scene_refs(p.get('scenes',[]))
+            for s in p.get('scenes',[]):
+                path=s.pop('archivePath',None)
+                if path:
+                    if path!=f'scenes/{s["id"]}.tar.gz': raise ValueError('Неверная ссылка на пакет сцены')
+                    s.update(scenes.store_bundle(s['id'],z.read(path),source=s.get('source')))
         return validate_project(p)
     except ValueError: raise
     except Exception as e: raise ValueError('Не удалось открыть переносимый проект RoomPlan') from e

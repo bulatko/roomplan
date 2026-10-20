@@ -14,8 +14,9 @@ class ProviderUnavailable(Exception): pass
 
 def health():
     from .video_service import health as video_health  # imports ProviderUnavailable from here
+    from .functions import health as detection_health
     url=os.environ.get('ROOMPLAN_RECONSTRUCTION_URL','')
-    return {'status':'ok','version':1,'videoExport':{'available':bool(shutil.which('ffmpeg')),'method':'fixed-frame FFmpeg VP9','fps':15},'providers':{'plan':{'available':True,'method':'CPU threshold + axis-line detection'},'video':video_health(),'photos':{'available':False,'mode':'synthetic-demo-stub'},'object':{'configured':bool(url),'available':None if url else False,'method':'local Stable Fast 3D adapter','status':'configured; connectivity checked on inference' if url else 'disabled; set ROOMPLAN_RECONSTRUCTION_URL','externalUpload':False}}}
+    return {'status':'ok','version':1,'videoExport':{'available':bool(shutil.which('ffmpeg')),'method':'fixed-frame FFmpeg VP9','fps':15},'providers':{'plan':{'available':True,'method':'CPU threshold + axis-line detection'},'video':video_health(),'detection':detection_health(),'photos':{'available':False,'mode':'synthetic-demo-stub'},'object':{'configured':bool(url),'available':None if url else False,'method':'local Stable Fast 3D adapter','status':'configured; connectivity checked on inference' if url else 'disabled; set ROOMPLAN_RECONSTRUCTION_URL','externalUpload':False}}}
 
 def reconstruct_object(payload):
     files=validate_files(payload.get('files',[]),20)
