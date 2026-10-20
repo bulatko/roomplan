@@ -325,7 +325,7 @@ def result_to_project(result,cloud=None,job_id='',video_name='video'):
               f'Высота потолка {ceiling} м оценена по {"плотности облака точек (пол и потолок)" if levels else "стенам результата"}; толщина стен по видео не определяется, принято {round(DEFAULT_THICKNESS*100)} см.']
     stem=video_name.rsplit('.',1)[0][:150] or 'видео'
     p=dict(version=1,name=f'План по видео · {stem}',ceilingHeight=ceiling,walls=[],rooms=[],objects=[],openings=[],pointCloud=[],sources=[],assets=[],
-           layers={'architecture':True,'furniture':True,'pointCloud':cloud is not None and len(cloud)>0,'boxes':False,'research':False})
+           layers={'architecture':True,'furniture':True,'pointCloud':False,'boxes':False,'research':False})  # cloud kept, shown on demand (Слои)
     X=Y=Z=None
     if cloud is not None and len(cloud):
         xyz=np.asarray(cloud,dtype=np.float64).reshape(-1,3);xyz=xyz[np.isfinite(xyz).all(1)]

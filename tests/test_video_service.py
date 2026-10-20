@@ -111,7 +111,7 @@ class ConverterTests(unittest.TestCase):
         door=p['openings'][0];self.assertEqual((door['kind'],door['wallId']),('door','w1'))
         self.assertAlmostEqual(door['sillHeight'],0,delta=.03);self.assertAlmostEqual(door['height'],2.1,delta=.03)
         self.assertAlmostEqual(math.dist(door['a'],door['b']),.9,places=3)
-        self.assertTrue(p['layers']['pointCloud']);self.assertLessEqual(len(p['pointCloud']),60000)
+        self.assertFalse(p['layers']['pointCloud']);self.assertTrue(p['pointCloud']);self.assertLessEqual(len(p['pointCloud']),60000)  # kept, hidden by default
         cloud=np.array(p['pointCloud']);self.assertAlmostEqual(float(np.median(cloud[cloud[:,1]<1,1])),0,delta=.02)
         self.assertTrue(any('пропущены: 1' in x for x in w))
 
