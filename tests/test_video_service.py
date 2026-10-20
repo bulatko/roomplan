@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
-from roomplan import scenes
+from roomplan import jobs, scenes
 from roomplan.model import validate_project
 try: from test_scenes import make_bundle            # unittest discover -s tests
 except ImportError: from tests.test_scenes import make_bundle
@@ -200,6 +200,7 @@ class FakeService(BaseHTTPRequestHandler):
         self.send(200,{k:v for k,v in FakeService.jobs[jid].items() if k!='polls'})
     def do_GET(self):
         if not self.authorised(): return
+        if self.path=='/api/jobs': return self.send(200,[{k:v for k,v in j.items() if k not in ('polls','log_tail')} for j in FakeService.jobs.values()])
         m=re.fullmatch(r'/api/jobs/([^/]+)(?:/files/([^/]+))?',self.path)
         job=FakeService.jobs.get(m.group(1)) if m else None
         if not job: return self.send(404,{'detail':'no such job'})
@@ -241,7 +242,7 @@ class VideoAPITests(unittest.TestCase):
 
     def test_upload_poll_and_convert(self):
         with self.env():
-            self.assertTrue(health()['providers']['video']['available'])
+            self.assertTrue(health()['providers']['video']['available']);downloads0=FakeService.scene_downloads
             status,data=request(self.url+'/api/reconstruct/video',self.video('Комната 1.mp4'))
             self.assertEqual(status,200);job=data['job'];self.assertEqual(job['status'],'queued');self.assertNotIn('log_tail',job)
             upload=FakeService.uploads[-1];self.assertEqual(upload['name'],'Комната 1.mp4');self.assertIn(b'ftypmp42video-bytes',upload['body'])
@@ -255,8 +256,30 @@ class VideoAPITests(unittest.TestCase):
             self.assertTrue(p['pointCloud']);validate_project(p)
             # Scene bundle went to the shared space, referenced by the project; a repeated poll does not fetch it again.
             self.assertEqual((p['scenes'][0]['id'],p['scenes'][0]['frames'],p['scenes'][0]['source']['job']),(job['id'],2,job['id']))
-            self.assertTrue(scenes.bundle_path(job['id']).is_file());self.assertEqual(FakeService.scene_downloads,1)
-            request(self.url+'/api/reconstruct/video/'+job['id']);self.assertEqual(FakeService.scene_downloads,1)
+            self.assertTrue(scenes.bundle_path(job['id']).is_file());self.assertEqual(FakeService.scene_downloads-downloads0,1)
+            request(self.url+'/api/reconstruct/video/'+job['id']);self.assertEqual(FakeService.scene_downloads-downloads0,1)
+
+    def test_job_journal_lists_jobs_and_reopens_results_later(self):
+        with self.env():
+            _,data=request(self.url+'/api/reconstruct/video',self.video('Кухня.mp4'));jid=data['job']['id']
+            meta=jobs.get(jid);self.assertEqual((meta['kind'],meta['input']['name']),('video-reconstruction','Кухня.mp4'))
+            self.assertIn(b'ftypmp42video-bytes',(jobs.job_dir(jid)/meta['input']['file']).read_bytes())
+            other='20261020-000000-elsewh';FakeService.jobs[other]={'id':other,'status':'queued','stage':None,'message':None,'error':None,'files':[],
+                                                                  'video':{'name':'android.mp4','size':1},'created':1,'polls':0}
+            status,listing=request(self.url+'/api/jobs');self.assertEqual((status,listing['serviceError']),(200,None))
+            by={j['id']:j for j in listing['jobs']}
+            self.assertEqual((by[jid]['origin'],by[jid]['status'],by[jid]['hasInput']),('app','queued',True))
+            self.assertEqual((by[other]['origin'],by[other]['video']['name']),('service','android.mp4'))  # started elsewhere, still visible
+            for _ in range(2): _,data=request(self.url+'/api/reconstruct/video/'+jid)  # "another tab": no browser state at all
+            self.assertEqual([s['name'] for s in data['project']['sources']],['Кухня.mp4'])   # recorded video is the source
+            self.assertTrue(base64.b64decode(data['project']['sources'][0]['data']).endswith(b'video-bytes'))
+            by={j['id']:j for j in request(self.url+'/api/jobs')[1]['jobs']}
+            self.assertEqual((by[jid]['resultReady'],by[jid]['hasScene'],by[jid]['sceneStored']),(True,True,True))
+            del FakeService.jobs[other]
+        with self.env(ROOMPLAN_VIDEO_API_URL='http://127.0.0.1:9'):  # service down: the journal is still listed
+            listing=request(self.url+'/api/jobs')[1]
+            self.assertIn('недоступен',listing['serviceError']);self.assertIn(jid,[j['id'] for j in listing['jobs'] if j['status']=='unknown'])
+        with self.assertRaises(ValueError): jobs.job_dir('../x')
 
     def test_failed_job_is_reported_without_project(self):
         with self.env():

@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import numpy as np
-from . import scenes
+from . import jobs, scenes
 from .model import CATALOG, validate_files
 from .providers import ProviderUnavailable
 
@@ -118,7 +118,33 @@ def submit_video(payload):
     body,content_type=_multipart({'include_cloud':'true','formats':'json','options':json.dumps(options)},f['name'],f['mime'] if f['mime'].startswith('video/') else 'application/octet-stream',base64.b64decode(f['data']))
     job=_json(_call('/api/jobs',body,content_type,timeout=900))
     if not isinstance(job.get('id'),str) or not JOB_ID.fullmatch(job['id']): raise ProviderUnavailable('Сервис реконструкции не вернул идентификатор задачи')
+    jobs.record(job['id'],'video-reconstruction',f,service='roomplan-app',options=options)  # visible after reload, video kept
     return {'job':public_job(job)}
+
+def list_jobs(limit=100):
+    """Jobs of the reconstruction service (also those started elsewhere) merged with the app's journal.
+    -> {jobs:[...], serviceError}. Without the service the journal is still listed."""
+    remote,error=[],None
+    try:
+        raw=_call('/api/jobs')
+        value=json.loads(raw)
+        if not isinstance(value,list): raise ProviderUnavailable('Сервис реконструкции вернул неожиданный список задач')
+        remote=[j for j in value if isinstance(j,dict) and isinstance(j.get('id'),str) and JOB_ID.fullmatch(j['id'])][:limit]
+    except (ProviderUnavailable,ValueError) as e: error=str(e)
+    local={m['id']:m for m in jobs.recorded()}
+    out=[]
+    for j in remote:
+        files=j.get('files') if isinstance(j.get('files'),list) else []
+        item=public_job(j);meta=local.pop(j['id'],None)
+        item.update(origin='app' if meta else 'service',resultReady=j.get('status')=='done' and 'result.json' in files,hasScene='scene.tar.gz' in files,
+                    hasInput=bool(meta),sceneStored=scenes.summary(j['id']) is not None)
+        out.append(item)
+    for meta in local.values():  # recorded here but unknown to the service now (deleted there, or service unreachable)
+        out.append({'id':meta['id'],'status':'unknown','stage':None,'message':None,'error':None,'created':meta.get('createdAt'),'claimed':None,'finished':None,
+                    'video':{'name':meta['input']['name'],'size':meta['input']['bytes']},'origin':'app','resultReady':False,'hasScene':False,'hasInput':True,
+                    'sceneStored':scenes.summary(meta['id']) is not None})
+    out.sort(key=lambda j:j.get('created') or 0,reverse=True)
+    return {'jobs':out,'serviceError':error}
 
 def poll_video(job_id):
     if not isinstance(job_id,str) or not JOB_ID.fullmatch(job_id) or '..' in job_id: raise ValueError('Неверный идентификатор задачи')
@@ -135,6 +161,8 @@ def poll_video(job_id):
     video=job.get('video') if isinstance(job.get('video'),dict) else {}
     project,warnings=result_to_project(result,cloud,job_id=job_id,video_name=str(video.get('name') or 'video'))
     if 'cloud.ply' in names and cloud is None: warnings.append('Облако точек не прочитано: слой облака пуст.')
+    source=jobs.input_source(job_id)  # the video recorded at submission: the result opened later keeps its source
+    if source: project['sources']=[source]
     # Scene bundle (posed frames + cloud + plan) goes to the shared server space for the next functions.
     if 'scene.tar.gz' in names:
         try:

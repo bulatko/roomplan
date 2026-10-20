@@ -12,7 +12,7 @@ from roomplan.storage import load_project, save_project
 from roomplan.export import export_svg
 from roomplan.providers import health, reconstruct_object, ProviderUnavailable
 from roomplan.video import encode_walkthrough
-from roomplan.video_service import poll_video, submit_video
+from roomplan.video_service import list_jobs, poll_video, submit_video
 from roomplan import scenes
 from roomplan.functions import detect
 
@@ -42,6 +42,7 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/demo': return self.reply(200,demo_project())
         if path=='/api/catalog': return self.reply(200,CATALOG)
         if path=='/api/health': return self.reply(200,health())
+        if path=='/api/jobs': return self.reply(200,list_jobs())
         if path.startswith(VIDEO_JOB_PREFIX):
             try:
                 result=poll_video(path.removeprefix(VIDEO_JOB_PREFIX))
