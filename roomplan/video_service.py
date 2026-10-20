@@ -30,6 +30,7 @@ JOB_ID=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 MAX_CLOUD_POINTS=60000
 MAX_DOWNLOAD=512*1024*1024
 DEFAULT_THICKNESS=.12
+PARTITION_MAX_GAP=.40
 METHOD='roomplan-app API: beam_rec -> wallfield P4 -> TUN3D'
 # ScanNet classes of the detector -> procedural furniture kind of this app.
 CLASS_KIND={'bed':'bed','sofa':'sofa','chair':'diningChair','table':'diningTable','desk':'desk','cabinet':'cabinet','counter':'cabinet','bookshelf':'wardrobe','refrigerator':'fridge','toilet':'toilet','sink':'sink','bathtub':'bathtub','garbagebin':'custom'}
@@ -198,6 +199,99 @@ def floor_ceiling(z):
     if floor is None or ceiling is None or not 1.5<=ceiling-floor<=10: return None
     return floor,ceiling
 
+def _axis(wall):
+    a=np.asarray(wall['a'],float);b=np.asarray(wall['b'],float);length=float(np.linalg.norm(b-a))
+    d=(b-a)/length;return a,d,np.array([-d[1],d[0]]),length
+
+def wall_rooms(walls,rooms,tol=.03):
+    """wall id -> index of the room whose contour has both wall ends as vertices (decoder walls are contour edges)."""
+    out={}
+    for w in walls:
+        for k,r in enumerate(rooms):
+            if all(min(math.dist(p,v) for v in r['polygon'])<=tol for p in (w['a'],w['b'])): out[w['id']]=k;break
+    return out
+
+def merge_partitions(walls,room_of,max_gap=PARTITION_MAX_GAP):
+    """Two scanned faces of one partition -> one wall on their mid-line, as thick as the gap.
+
+    The decoder closes every room with its own contour, so a partition appears twice: parallel
+    walls of different rooms 4-40 cm apart. The overlapping part is replaced; ends that do not
+    overlap stay where they were. -> (walls, partition walls)."""
+    cands=[]
+    for i,wi in enumerate(walls):
+        for j in range(i+1,len(walls)):
+            wj=walls[j];ri,rj=room_of.get(wi['id']),room_of.get(wj['id'])
+            if ri is None or rj is None or ri==rj: continue
+            a,d,n,length=_axis(wi);aj,dj,_,_=_axis(wj)
+            if abs(d[0]*dj[1]-d[1]*dj[0])>math.sin(math.radians(5)): continue
+            ends=[np.asarray(wj[k],float)-a for k in ('a','b')]
+            u=[float(e@d) for e in ends];gap=float(np.mean([e@n for e in ends]))
+            s0,s1=max(0.,min(u)),min(length,max(u))
+            if .04<=abs(gap)<=max_gap and s1-s0>=.3: cands.append((s1-s0,i,j,s0,s1,gap))
+    used=set();replaced={};partitions=[]
+    for _,i,j,s0,s1,gap in sorted(cands,reverse=True):
+        if i in used or j in used: continue
+        used|={i,j};wi,wj=walls[i],walls[j];a,d,n,length=_axis(wi);aj,dj,_,lj=_axis(wj)
+        pa,pb=a+d*s0+n*gap/2,a+d*s1+n*gap/2
+        # Close the notch where the partition meets an outer wall that ends at one of the faces.
+        others=[np.asarray(w[k],float) for k2,w in enumerate(walls) if k2 not in (i,j) for k in ('a','b')]
+        if any(np.linalg.norm(o-pa)<.35 for o in others): pa=pa-d*DEFAULT_THICKNESS/2
+        if any(np.linalg.norm(o-pb)<.35 for o in others): pb=pb+d*DEFAULT_THICKNESS/2
+        part=dict(id=wi['id'],a=[round(float(v),4) for v in pa],b=[round(float(v),4) for v in pb],height=max(wi['height'],wj['height']),
+                  thickness=round(min(.5,max(.05,abs(gap))),3),partition=True)
+        pieces=[]
+        for w,(o,dd,L),(t0,t1) in ((wi,(a,d,length),(s0,s1)),(wj,(aj,dj,lj),sorted([float((pa-aj)@dj),float((pb-aj)@dj)]))):
+            for u0,u1 in ((0.,t0),(t1,L)):
+                if u1-u0>=.05: pieces.append(dict(w,a=[round(float(v),4) for v in o+dd*u0],b=[round(float(v),4) for v in o+dd*u1]))
+        replaced[i]=[part]+pieces;replaced[j]=[];partitions.append(part)
+    merged=[]
+    for k,w in enumerate(walls): merged.extend(replaced.get(k,[w]))
+    return merged,partitions
+
+def find_passages(wall,X,Y,Z,step=.05):
+    """Openings through a partition seen in the cloud: both faces empty at 0.3-1.8 m while the floor
+    between the faces is visible (a solid wall hides it). -> [(u0, u1, height)] along the wall."""
+    a,d,n,length=_axis(wall);t=wall['thickness']
+    u=(X-a[0])*d[0]+(Z-a[1])*d[1];v=(X-a[0])*n[0]+(Z-a[1])*n[1]
+    near=(u>=0)&(u<=length)&(np.abs(v)<t/2+.06);u,v,y=u[near],v[near],Y[near]
+    bins=np.arange(0,length+step,step)
+    if len(bins)<3: return []
+    face=np.abs(np.abs(v)-t/2)<.05
+    fc=np.histogram(u[face&(y>.3)&(y<1.8)],bins)[0];gc=np.histogram(u[(np.abs(v)<max(.02,t/2-.02))&(y>-.06)&(y<.1)],bins)[0]
+    if not (fc>0).any(): return []
+    med=float(np.median(fc[fc>0]))
+    if med<20: return []  # too sparse to tell a doorway from a gap in the scan
+    is_open=(fc<=.15*med)&(gc>=max(2,.01*med))
+    for k in range(1,len(is_open)-1):  # bridge single-bin holes
+        if not is_open[k] and is_open[k-1] and is_open[k+1]: is_open[k]=True
+    found=[];k=0
+    while k<len(is_open):
+        if not is_open[k]: k+=1;continue
+        m=k
+        while m<len(is_open) and is_open[m]: m+=1
+        u0,u1=float(bins[k]),float(bins[m])
+        if .5<=u1-u0<=3:
+            lintel=y[face&(u>=u0)&(u<u1)&(y>1.5)]
+            top=float(np.percentile(lintel,5)) if len(lintel)>=10 else 2.1
+            found.append((u0,u1,min(wall['height'],max(1.8,top))))
+        k=m
+    return found
+
+def attach_opening(a,b,walls):
+    """Nearest final wall carrying the segment a-b (parallel, close, midpoint within the wall span) -> (wall, a, b on its line) or None."""
+    a=np.asarray(a,float);b=np.asarray(b,float);mid=(a+b)/2;best=None
+    if np.linalg.norm(b-a)<1e-6: return None
+    e=(b-a)/np.linalg.norm(b-a)
+    for w in walls:
+        o,d,n,length=_axis(w)
+        if abs(e[0]*d[1]-e[1]*d[0])>math.sin(math.radians(10)): continue
+        dist=abs(float((mid-o)@n));s=float((mid-o)@d)
+        if dist<=w['thickness']/2+.2 and -.1<=s<=length+.1 and (best is None or dist<best[0]): best=(dist,w,o,d)
+    if best is None: return None
+    # Onto the wall line, not clipped to the wall: a door may span several short decoder segments.
+    _,w,o,d=best;proj=lambda p:[round(float(v),4) for v in o+d*float((p-o)@d)]
+    return w,proj(a),proj(b)
+
 def result_to_project(result,cloud=None,job_id='',video_name='video'):
     """roomplan-app result.json (+ optional cloud xyz) -> (project, warnings).
 
@@ -232,12 +326,14 @@ def result_to_project(result,cloud=None,job_id='',video_name='video'):
     stem=video_name.rsplit('.',1)[0][:150] or 'видео'
     p=dict(version=1,name=f'План по видео · {stem}',ceilingHeight=ceiling,walls=[],rooms=[],objects=[],openings=[],pointCloud=[],sources=[],assets=[],
            layers={'architecture':True,'furniture':True,'pointCloud':cloud is not None and len(cloud)>0,'boxes':False,'research':False})
-    wall_ids={}
+    X=Y=Z=None
+    if cloud is not None and len(cloud):
+        xyz=np.asarray(cloud,dtype=np.float64).reshape(-1,3);xyz=xyz[np.isfinite(xyz).all(1)]
+        X=xyz[:,0]*cos+xyz[:,1]*sin-ox;Z=-(-xyz[:,0]*sin+xyz[:,1]*cos)-oz;Y=xyz[:,2]-floor
     for i,(w,h) in enumerate(zip(raw_walls,heights)):
         a,b=to_xz(w['a']),to_xz(w['b'])
         if math.dist(a,b)<.01: continue
-        wall_ids[i]=f'w{len(p["walls"])+1}'  # openings reference walls by index in result.json
-        p['walls'].append(dict(id=f'w{len(p["walls"])+1}',a=a,b=b,height=round(h,3),thickness=DEFAULT_THICKNESS))
+        p['walls'].append(dict(id=f's{i}',a=a,b=b,height=round(h,3),thickness=DEFAULT_THICKNESS))
     holes=0
     for r in result.get('rooms') or []:
         if not isinstance(r,dict) or not isinstance(r.get('poly'),list): continue
@@ -251,6 +347,18 @@ def result_to_project(result,cloud=None,job_id='',video_name='video'):
         n=len(p['rooms'])
         p['rooms'].append(dict(id=f'r{n+1}',name=f'Помещение {n+1} · {area:.1f} м²',polygon=poly,color=ROOM_COLORS[n%len(ROOM_COLORS)]))
     if holes: warnings.append(f'Внутренние контуры комнат ({holes}) не перенесены: колонны и выступы проверьте вручную.')
+    p['walls'],partitions=merge_partitions(p['walls'],wall_rooms(p['walls'],p['rooms']))
+    for k,w in enumerate(p['walls']): w['id']=f'w{k+1}'
+    passages=0
+    for w in partitions:
+        for u0,u1,h in (find_passages(w,X,Y,Z) if X is not None else []):
+            o,d,_,_=_axis(w)
+            p['openings'].append(dict(id=f'passage{passages+1}',kind='door',wallId=w['id'],a=[round(float(v),4) for v in o+d*u0],b=[round(float(v),4) for v in o+d*u1],
+                                      height=round(h,3),sillHeight=0.,detection={'source':'cloud: empty partition faces, visible floor between them'}))
+            passages+=1
+    if partitions:
+        warnings.append(f'Перегородки между помещениями: {len(partitions)}. Две грани скана слиты в одну стену толщиной '+', '.join(f'{round(w["thickness"]*100)} см' for w in partitions)+'.')
+        warnings.append(f'Проходы между помещениями найдены по облаку точек: {passages}.' if passages else 'Проход между помещениями в облаке точек не найден: добавьте дверь в перегородке вручную, если она есть.')
     catalog_by_kind={}
     for c in CATALOG: catalog_by_kind.setdefault(c['kind'],c)
     skipped={}
@@ -276,24 +384,22 @@ def result_to_project(result,cloud=None,job_id='',video_name='video'):
     for kind,items in (('door',result.get('doors') or []),('window',result.get('windows') or [])):
         for it in items:
             if not isinstance(it,dict) or not isinstance(it.get('corners'),list) or len(it['corners'])<2: dropped+=1;continue
-            wid=wall_ids.get(it.get('wall'))
-            wall=next((w for w in p['walls'] if w['id']==wid),None)
-            if wall is None: dropped+=1;continue
+            a,b=finite_xz(it['corners'][0]),finite_xz(it['corners'][1])
+            # Attach geometrically: wall indices of result.json no longer exist after partitions are merged.
+            hit=attach_opening(a,b,p['walls']) if a is not None and b is not None else None
+            if hit is None: dropped+=1;continue
+            wall,a,b=hit
             c=it['corners']  # 2 bottom then 2 top corners, world z; 'sill' is relative to the decoder wall bottom
             if len(c)>=3 and all(isinstance(v,list) and len(v)>=3 for v in c[:3]):
                 sill=max(0.,_num(c[0][2],floor)-floor);top=min(wall['height'],_num(c[2][2],floor)-floor)
             else: sill=max(0.,_num(it.get('sill')));top=min(wall['height'],sill+max(0.,_num(it.get('height'))))
-            a,b=finite_xz(it['corners'][0]),finite_xz(it['corners'][1])
-            if a is None or b is None or top-sill<.1 or math.dist(a,b)<.05: dropped+=1;continue
-            p['openings'].append(dict(id=f'{kind}{len(p["openings"])+1}',kind=kind,wallId=wid,a=a,b=b,height=round(top-sill,3),sillHeight=round(sill,3),detection={'score':round(_num(it.get('score')),4),'source':str(it.get('src',''))[:50]}))
+            if top-sill<.1 or math.dist(a,b)<.05: dropped+=1;continue
+            p['openings'].append(dict(id=f'{kind}{len(p["openings"])+1}',kind=kind,wallId=wall['id'],a=a,b=b,height=round(top-sill,3),sillHeight=round(sill,3),detection={'score':round(_num(it.get('score')),4),'source':str(it.get('src',''))[:50]}))
     if dropped: warnings.append(f'Проёмы вне стен или вне высоты стены пропущены: {dropped}.')
-    if cloud is not None and len(cloud):
-        xyz=np.asarray(cloud,dtype=np.float64).reshape(-1,3)
-        xyz=xyz[np.isfinite(xyz).all(1)]
-        if len(xyz)>MAX_CLOUD_POINTS: xyz=xyz[np.sort(np.random.default_rng(0).choice(len(xyz),MAX_CLOUD_POINTS,replace=False))]
-        px=xyz[:,0]*cos+xyz[:,1]*sin-ox;pz=-(-xyz[:,0]*sin+xyz[:,1]*cos)-oz;py=xyz[:,2]-floor
-        keep=(np.abs(px)<999)&(np.abs(pz)<999)&(np.abs(py)<999)
-        p['pointCloud']=np.round(np.stack([px,py,pz],1)[keep],3).tolist()
+    if X is not None and len(X):
+        pts=np.stack([X,Y,Z],1)
+        if len(pts)>MAX_CLOUD_POINTS: pts=pts[np.sort(np.random.default_rng(0).choice(len(pts),MAX_CLOUD_POINTS,replace=False))]
+        p['pointCloud']=np.round(pts[(np.abs(pts)<999).all(1)],3).tolist()
     meta=result.get('meta') if isinstance(result.get('meta'),dict) else {}
     quality=meta.get('quality') if isinstance(meta.get('quality'),dict) else {}
     red=[str(g) for g in quality.get('red_gates') or []]

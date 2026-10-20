@@ -15,7 +15,7 @@ from unittest.mock import patch
 import numpy as np
 from roomplan.model import validate_project
 from roomplan.providers import health
-from roomplan.video_service import dominant_angle, floor_ceiling, public_job, read_ply, result_to_project
+from roomplan.video_service import DEFAULT_THICKNESS, dominant_angle, floor_ceiling, public_job, read_ply, result_to_project
 from server import Handler, load_env
 
 PHI=math.radians(30)  # plan rotation of the synthetic scan
@@ -49,6 +49,23 @@ def synthetic_cloud():
     uv=np.c_[rng.uniform(0,4,4000),np.zeros(4000)];pts.append(np.c_[[rot(u,v) for u,v in uv],rng.uniform(.1,2.6,4000)])
     xyz=np.concatenate(pts);xyz[:,0]+=5;xyz[:,1]-=2
     return xyz.astype(np.float32)
+
+def two_rooms(doorway=True):
+    """Rooms A x 0..4 and B x 4.16..8 (z 0..3, service frame) split by a 16 cm partition;
+    optional 0.9 m doorway at y 1.2..2.1 with a lintel at 2.0 m. Floor z=0, ceiling 2.6."""
+    def contour(x0,x1): return [[x0,0],[x1,0],[x1,3],[x0,3]]
+    rooms=[contour(0,4),contour(4.16,8)]
+    walls=[dict(id=len(rooms[0])*k+i,a=r[i],b=r[(i+1)%4],z_floor=-.2,z_ceil=2.7) for k,r in enumerate(rooms) for i in range(4)]
+    result={'meta':{},'rooms':[{'id':k,'poly':r,'holes':[],'z_floor':-.2,'z_ceil':2.7} for k,r in enumerate(rooms)],'walls':walls,'objects':[],'doors':[],'windows':[]}
+    rng=np.random.default_rng(5);pts=[]
+    for x0,x1 in ((0,4),(4.16,8)):
+        for z,n in ((0.,20000),(2.6,15000)): pts.append(np.c_[rng.uniform(x0,x1,n),rng.uniform(0,3,n),np.full(n,z)])
+    for x in (4.,4.16):  # both partition faces
+        f=np.c_[np.full(12000,x),rng.uniform(0,3,12000),rng.uniform(.05,2.6,12000)]
+        if doorway: f=f[~((f[:,1]>1.2)&(f[:,1]<2.1)&(f[:,2]<2.0))]
+        pts.append(f)
+    if doorway: pts.append(np.c_[rng.uniform(4.,4.16,400),rng.uniform(1.2,2.1,400),np.zeros(400)])  # threshold floor seen through
+    return result,np.concatenate(pts).astype(np.float32)
 
 def ply_binary(xyz):
     header=f'ply\nformat binary_little_endian 1.0\nelement vertex {len(xyz)}\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n'.encode()
@@ -97,6 +114,29 @@ class ConverterTests(unittest.TestCase):
         self.assertTrue(p['layers']['pointCloud']);self.assertLessEqual(len(p['pointCloud']),60000)
         cloud=np.array(p['pointCloud']);self.assertAlmostEqual(float(np.median(cloud[cloud[:,1]<1,1])),0,delta=.02)
         self.assertTrue(any('пропущены: 1' in x for x in w))
+
+    def test_partition_faces_merge_and_doorway_from_cloud(self):
+        result,cloud=two_rooms()
+        p,w=result_to_project(result,cloud);p,_=validate_project(p)
+        parts=[x for x in p['walls'] if x.get('partition')];self.assertEqual(len(parts),1);part=parts[0]
+        self.assertEqual(len(p['walls']),7)  # 8 contour walls, two faces became one partition
+        self.assertAlmostEqual(part['thickness'],.16,places=3)
+        self.assertAlmostEqual(part['a'][0],4.08,places=3);self.assertAlmostEqual(part['b'][0],4.08,places=3)  # mid-line
+        self.assertAlmostEqual(abs(part['a'][1]-part['b'][1]),3+DEFAULT_THICKNESS,places=3)  # reaches into the outer walls
+        door=[o for o in p['openings'] if o['wallId']==part['id']];self.assertEqual(len(door),1);door=door[0]
+        # Service y 1.2..2.1 -> project z = 3 - y = 0.9..1.8.
+        self.assertEqual((door['kind'],door['sillHeight']),('door',0.))
+        self.assertAlmostEqual(min(door['a'][1],door['b'][1]),.9,delta=.06);self.assertAlmostEqual(max(door['a'][1],door['b'][1]),1.8,delta=.06)
+        self.assertAlmostEqual(door['height'],2.0,delta=.05)
+        self.assertTrue(any('Перегородки между помещениями: 1' in x and '16 см' in x for x in w));self.assertTrue(any('Проходы между помещениями найдены по облаку точек: 1' in x for x in w))
+
+    def test_solid_partition_or_no_cloud_gives_no_passage(self):
+        result,cloud=two_rooms(doorway=False)
+        for c in (cloud,None):
+            p,w=result_to_project(result,c);validate_project(p)
+            self.assertEqual(sum(1 for x in p['walls'] if x.get('partition')),1);self.assertEqual(p['openings'],[])
+            self.assertTrue(any('Проход между помещениями в облаке точек не найден' in x for x in w))
+        p,_=result_to_project(synthetic_result());self.assertFalse(any(x.get('partition') for x in p['walls']))  # one room: nothing to merge
 
     def test_rejects_results_without_walls(self):
         for bad in [{},{'walls':[]},{'walls':[{'a':[0,'x'],'b':[1,1]}]}]:
