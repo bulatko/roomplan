@@ -40,25 +40,27 @@ ROOM_COLORS=['#e9dfca','#e8d9c8','#ded7ca','#e0e5df','#e6dccf','#dfe2d6']
 PLY_TYPES={'char':'i1','int8':'i1','uchar':'u1','uint8':'u1','short':'i2','int16':'i2','ushort':'u2','uint16':'u2','int':'i4','int32':'i4','uint':'u4','uint32':'u4','float':'f4','float32':'f4','double':'f8','float64':'f8'}
 
 def config():
+    """-> ((url, token, options), None) or (None, reason)."""
     url=os.environ.get('ROOMPLAN_VIDEO_API_URL','').strip().rstrip('/')
     token=os.environ.get('ROOMPLAN_VIDEO_API_TOKEN','').strip()
-    if not url or not token: return None
+    if not url or not token: return None,'disabled; set ROOMPLAN_VIDEO_API_URL and ROOMPLAN_VIDEO_API_TOKEN'
     parsed=urllib.parse.urlparse(url)
-    if parsed.scheme not in ('http','https') or not parsed.hostname: return None
+    if parsed.scheme not in ('http','https') or not parsed.hostname: return None,'ROOMPLAN_VIDEO_API_URL must be an http(s) URL'
+    # The token and the video travel with the requests: plain HTTP only to this machine (local service or SSH tunnel).
+    if parsed.scheme=='http' and parsed.hostname not in ('127.0.0.1','localhost','::1'): return None,'ROOMPLAN_VIDEO_API_URL must use https for a remote host (plain http only on loopback)'
     try: options=json.loads(os.environ.get('ROOMPLAN_VIDEO_API_OPTIONS','') or '{}')
     except json.JSONDecodeError: options=None
-    if not isinstance(options,dict): return None
-    return url,token,options
+    if not isinstance(options,dict): return None,'ROOMPLAN_VIDEO_API_OPTIONS must be a JSON object'
+    return (url,token,options),None
 
 def health():
-    cfg=config()
+    cfg,reason=config()
     if cfg: return {'available':True,'mode':'remote-service','method':METHOD,'status':'configured; connectivity checked on upload','externalUpload':True}
-    configured=bool(os.environ.get('ROOMPLAN_VIDEO_API_URL') or os.environ.get('ROOMPLAN_VIDEO_API_TOKEN'))
-    return {'available':False,'mode':'synthetic-demo-stub','method':METHOD,'status':'invalid ROOMPLAN_VIDEO_API_* settings' if configured else 'disabled; set ROOMPLAN_VIDEO_API_URL and ROOMPLAN_VIDEO_API_TOKEN','externalUpload':False}
+    return {'available':False,'mode':'synthetic-demo-stub','method':METHOD,'status':reason,'externalUpload':False}
 
 def _require():
-    cfg=config()
-    if not cfg: raise ProviderUnavailable('Сервис реконструкции по видео не настроен: задайте ROOMPLAN_VIDEO_API_URL и ROOMPLAN_VIDEO_API_TOKEN (окружение или .env). Видео не отправлялось.')
+    cfg,reason=config()
+    if not cfg: raise ProviderUnavailable(f'Сервис реконструкции по видео не настроен ({reason}). Видео не отправлялось.')
     return cfg
 
 def _call(path,data=None,content_type=None,timeout=60,limit=8*1024*1024):

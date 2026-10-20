@@ -194,9 +194,14 @@ class VideoAPITests(unittest.TestCase):
         with patch.dict(os.environ,{'ROOMPLAN_VIDEO_API_URL':'','ROOMPLAN_VIDEO_API_TOKEN':''}):
             self.assertFalse(health()['providers']['video']['available'])
             status,data=request(self.url+'/api/reconstruct/video',self.video());self.assertEqual(status,503);self.assertIn('ROOMPLAN_VIDEO_API_URL',data['error'])
+            self.assertIn('disabled',health()['providers']['video']['status'])
         with self.env(ROOMPLAN_VIDEO_API_TOKEN='wrong'):
             status,data=request(self.url+'/api/reconstruct/video',self.video());self.assertEqual(status,503);self.assertIn('токен',data['error'])
         with self.env(ROOMPLAN_VIDEO_API_OPTIONS='[1]'): self.assertFalse(health()['providers']['video']['available'])
+        with self.env(ROOMPLAN_VIDEO_API_URL='http://plan.example.org:8802'):  # token must not travel in clear
+            video=health()['providers']['video'];self.assertFalse(video['available']);self.assertIn('https',video['status'])
+            status,data=request(self.url+'/api/reconstruct/video',self.video());self.assertEqual(status,503);self.assertIn('https',data['error'])
+        with self.env(ROOMPLAN_VIDEO_API_URL='https://plan.example.org:8443'): self.assertTrue(health()['providers']['video']['available'])
         with self.env():
             self.assertEqual(request(self.url+'/api/reconstruct/video',{'files':[]})[0],400)
             self.assertEqual(request(self.url+'/api/reconstruct/video',{'files':[{'name':'plan.png','mime':'image/png','data':'AAAA'}]})[0],400)
