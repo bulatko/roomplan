@@ -133,6 +133,7 @@ def reconstruct(payload):
         p['layers']['pointCloud']=True
         p['provenance']={'mode':mode,'method':'deterministic-demo-stub-v1','isSynthetic':True,'inputUsedForGeometry':False}
         warnings=['ДЕМОНСТРАЦИОННАЯ ЗАГЛУШКА: геометрия и облако точек синтетические. Содержимое фотографий/видео не анализируется. Исходные файлы сохранены для будущего подключения SfM / SLAM / распознавания.']
+        if mode=='video': warnings.append('Настоящий план по видео строит внешний сервис реконструкции: POST /api/reconstruct/video при заданных ROOMPLAN_VIDEO_API_URL и ROOMPLAN_VIDEO_API_TOKEN.')
     else: raise ValueError('Неизвестный режим реконструкции')
     p['sources']=[dict(f,id=f.get('id',str(uuid.uuid4()))) for f in files]
     return p,warnings

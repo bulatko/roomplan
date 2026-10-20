@@ -7,3 +7,4 @@ artifacts/private/
 *.log
 artifacts/*.tgz
 artifacts/dependency-archives/
+.env
