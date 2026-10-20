@@ -211,42 +211,56 @@ def wall_rooms(walls,rooms,tol=.03):
             if all(min(math.dist(p,v) for v in r['polygon'])<=tol for p in (w['a'],w['b'])): out[w['id']]=k;break
     return out
 
-def merge_partitions(walls,room_of,max_gap=PARTITION_MAX_GAP):
+def merge_partitions(walls,room_of,max_gap=PARTITION_MAX_GAP,min_overlap=.3):
     """Two scanned faces of one partition -> one wall on their mid-line, as thick as the gap.
 
     The decoder closes every room with its own contour, so a partition appears twice: parallel
-    walls of different rooms 4-40 cm apart. The overlapping part is replaced; ends that do not
-    overlap stay where they were. -> (walls, partition walls)."""
-    cands=[]
-    for i,wi in enumerate(walls):
+    walls of different rooms 4-40 cm apart. Bookkeeping is per interval: one face may border
+    several rooms along its length (a corridor and a bathroom), each overlap becomes its own
+    partition; parts that face no other room stay as they were.
+    -> (walls, partition walls, (room, room) per partition)."""
+    geo=[_axis(w) for w in walls];free=[[(0.,g[3])] for g in geo];pairs=[]
+    def overlap(i,j):  # longest common free interval of i and j, in i's parameter
+        a,d,_,_=geo[i];aj,dj,_,_=geo[j];base=float((aj-a)@d);sign=float(dj@d);best=None
+        for f0,f1 in free[i]:
+            for t0,t1 in free[j]:
+                lo,hi=max(f0,min(base+t0*sign,base+t1*sign)),min(f1,max(base+t0*sign,base+t1*sign))
+                if hi-lo>=min_overlap and (best is None or hi-lo>best[1]-best[0]): best=(lo,hi)
+        return best
+    for i in range(len(walls)):
         for j in range(i+1,len(walls)):
-            wj=walls[j];ri,rj=room_of.get(wi['id']),room_of.get(wj['id'])
+            ri,rj=room_of.get(walls[i]['id']),room_of.get(walls[j]['id'])
             if ri is None or rj is None or ri==rj: continue
-            a,d,n,length=_axis(wi);aj,dj,_,_=_axis(wj)
+            a,d,n,_=geo[i];aj,dj,_,_=geo[j]
             if abs(d[0]*dj[1]-d[1]*dj[0])>math.sin(math.radians(5)): continue
-            ends=[np.asarray(wj[k],float)-a for k in ('a','b')]
-            u=[float(e@d) for e in ends];gap=float(np.mean([e@n for e in ends]))
-            s0,s1=max(0.,min(u)),min(length,max(u))
-            if .04<=abs(gap)<=max_gap and s1-s0>=.3: cands.append((s1-s0,i,j,s0,s1,gap))
-    used=set();replaced={};partitions=[]
-    for _,i,j,s0,s1,gap in sorted(cands,reverse=True):
-        if i in used or j in used: continue
-        used|={i,j};wi,wj=walls[i],walls[j];a,d,n,length=_axis(wi);aj,dj,_,lj=_axis(wj)
+            if not .04<=abs(float(np.mean([(np.asarray(walls[j][k],float)-a)@n for k in ('a','b')])))<=max_gap: continue
+            if overlap(i,j): pairs.append((i,j))
+    def cut(intervals,lo,hi): return [(u0,u1) for a0,a1 in intervals for u0,u1 in ((a0,min(a1,lo)),(max(a0,hi),a1)) if u1-u0>1e-6]
+    made=[];changed=True
+    while changed:  # longest overlaps first; re-evaluated as faces get consumed
+        changed=False;best=None
+        for i,j in pairs:
+            ov=overlap(i,j)
+            if ov and (best is None or ov[1]-ov[0]>best[2][1]-best[2][0]): best=(i,j,ov)
+        if best is None: break
+        i,j,(s0,s1)=best;changed=True
+        a,d,n,_=geo[i];aj,dj,_,_=geo[j]
+        t0,t1=sorted((float((a+d*s0-aj)@dj),float((a+d*s1-aj)@dj)))
+        gap=float((aj+dj*(t0+t1)/2-a)@n)  # local offset at the overlap centre
+        free[i]=cut(free[i],s0,s1);free[j]=cut(free[j],t0,t1)
         pa,pb=a+d*s0+n*gap/2,a+d*s1+n*gap/2
-        # Close the notch where the partition meets an outer wall that ends at one of the faces.
+        # Close the notch where the partition meets a wall that ends at one of the faces.
         others=[np.asarray(w[k],float) for k2,w in enumerate(walls) if k2 not in (i,j) for k in ('a','b')]
         if any(np.linalg.norm(o-pa)<.35 for o in others): pa=pa-d*DEFAULT_THICKNESS/2
         if any(np.linalg.norm(o-pb)<.35 for o in others): pb=pb+d*DEFAULT_THICKNESS/2
-        part=dict(id=wi['id'],a=[round(float(v),4) for v in pa],b=[round(float(v),4) for v in pb],height=max(wi['height'],wj['height']),
-                  thickness=round(min(.5,max(.05,abs(gap))),3),partition=True)
-        pieces=[]
-        for w,(o,dd,L),(t0,t1) in ((wi,(a,d,length),(s0,s1)),(wj,(aj,dj,lj),sorted([float((pa-aj)@dj),float((pb-aj)@dj)]))):
-            for u0,u1 in ((0.,t0),(t1,L)):
-                if u1-u0>=.05: pieces.append(dict(w,a=[round(float(v),4) for v in o+dd*u0],b=[round(float(v),4) for v in o+dd*u1]))
-        replaced[i]=[part]+pieces;replaced[j]=[];partitions.append(part)
+        made.append((i,dict(id=walls[i]['id'],a=[round(float(v),4) for v in pa],b=[round(float(v),4) for v in pb],height=max(walls[i]['height'],walls[j]['height']),
+                            thickness=round(min(.5,max(.05,abs(gap))),3),partition=True),(room_of[walls[i]['id']],room_of[walls[j]['id']])))
     merged=[]
-    for k,w in enumerate(walls): merged.extend(replaced.get(k,[w]))
-    return merged,partitions
+    for k,w in enumerate(walls):
+        o,d,_,_=geo[k]
+        merged+=[dict(w,a=[round(float(v),4) for v in o+d*u0],b=[round(float(v),4) for v in o+d*u1]) if (u0,u1)!=(0.,geo[k][3]) else w for u0,u1 in free[k] if u1-u0>=.05]
+        merged+=[part for i,part,_ in made if i==k]
+    return merged,[part for _,part,_ in made],[rooms for _,_,rooms in made]
 
 def find_passages(wall,X,Y,Z,step=.05):
     """Openings through a partition seen in the cloud: both faces empty at 0.3-1.8 m while the floor
@@ -347,18 +361,8 @@ def result_to_project(result,cloud=None,job_id='',video_name='video'):
         n=len(p['rooms'])
         p['rooms'].append(dict(id=f'r{n+1}',name=f'Помещение {n+1} · {area:.1f} м²',polygon=poly,color=ROOM_COLORS[n%len(ROOM_COLORS)]))
     if holes: warnings.append(f'Внутренние контуры комнат ({holes}) не перенесены: колонны и выступы проверьте вручную.')
-    p['walls'],partitions=merge_partitions(p['walls'],wall_rooms(p['walls'],p['rooms']))
+    p['walls'],partitions,partition_rooms=merge_partitions(p['walls'],wall_rooms(p['walls'],p['rooms']))
     for k,w in enumerate(p['walls']): w['id']=f'w{k+1}'
-    passages=0
-    for w in partitions:
-        for u0,u1,h in (find_passages(w,X,Y,Z) if X is not None else []):
-            o,d,_,_=_axis(w)
-            p['openings'].append(dict(id=f'passage{passages+1}',kind='door',wallId=w['id'],a=[round(float(v),4) for v in o+d*u0],b=[round(float(v),4) for v in o+d*u1],
-                                      height=round(h,3),sillHeight=0.,detection={'source':'cloud: empty partition faces, visible floor between them'}))
-            passages+=1
-    if partitions:
-        warnings.append(f'Перегородки между помещениями: {len(partitions)}. Две грани скана слиты в одну стену толщиной '+', '.join(f'{round(w["thickness"]*100)} см' for w in partitions)+'.')
-        warnings.append(f'Проходы между помещениями найдены по облаку точек: {passages}.' if passages else 'Проход между помещениями в облаке точек не найден: добавьте дверь в перегородке вручную, если она есть.')
     catalog_by_kind={}
     for c in CATALOG: catalog_by_kind.setdefault(c['kind'],c)
     skipped={}
@@ -396,6 +400,30 @@ def result_to_project(result,cloud=None,job_id='',video_name='video'):
             if top-sill<.1 or math.dist(a,b)<.05: dropped+=1;continue
             p['openings'].append(dict(id=f'{kind}{len(p["openings"])+1}',kind=kind,wallId=wall['id'],a=a,b=b,height=round(top-sill,3),sillHeight=round(sill,3),detection={'score':round(_num(it.get('score')),4),'source':str(it.get('src',''))[:50]}))
     if dropped: warnings.append(f'Проёмы вне стен или вне высоты стены пропущены: {dropped}.')
+    # Passages seen in the cloud where the detector put no door (an open doorway has no door leaf to detect).
+    passages=0
+    for w in partitions:
+        o,d,_,_=_axis(w)
+        doors=[sorted(float((np.asarray(x[k])-o)@d) for k in ('a','b')) for x in p['openings'] if x['wallId']==w['id'] and x['kind']=='door']
+        for u0,u1,h in (find_passages(w,X,Y,Z) if X is not None else []):
+            if any(min(u1,b)-max(u0,a)>0 for a,b in doors): continue
+            passages+=1
+            p['openings'].append(dict(id=f'passage{passages}',kind='door',wallId=w['id'],a=[round(float(v),4) for v in o+d*u0],b=[round(float(v),4) for v in o+d*u1],
+                                      height=round(h,3),sillHeight=0.,detection={'source':'cloud: empty partition faces, visible floor between them'}))
+    if partitions:
+        warnings.append(f'Перегородки между помещениями: {len(partitions)}. Две грани скана слиты в одну стену толщиной '+', '.join(f'{round(w["thickness"]*100)} см' for w in partitions)+'.'+(f' Проходов найдено по облаку точек: {passages}.' if passages else ''))
+        # Rooms reachable from each other through doors in partitions.
+        link={k:{k} for k in range(len(p['rooms']))}
+        for w,(ri,rj) in zip(partitions,partition_rooms):
+            if any(x['wallId']==w['id'] and x['kind']=='door' for x in p['openings']):
+                group=link[ri]|link[rj]
+                for k in group: link[k]=group
+        neighbours={r for pair in partition_rooms for r in pair}
+        isolated=[p['rooms'][k]['name'].split(' · ')[0] for k in sorted(neighbours) if len(link[k])==1]
+        groups={frozenset(g) for k,g in link.items() if k in neighbours}
+        if isolated: warnings.append('Без прохода к соседним помещениям: '+', '.join(isolated)+'. Если проход есть, добавьте дверь в перегородке вручную.')
+        elif len(groups)==1: warnings.append('Все соседние помещения связаны проходами.')
+        else: warnings.append('Группы помещений не связаны между собой: '+'; '.join(', '.join(p['rooms'][k]['name'].split(' · ')[0] for k in sorted(g)) for g in groups)+'. Если проход есть, добавьте дверь в перегородке вручную.')
     if X is not None and len(X):
         pts=np.stack([X,Y,Z],1)
         if len(pts)>MAX_CLOUD_POINTS: pts=pts[np.sort(np.random.default_rng(0).choice(len(pts),MAX_CLOUD_POINTS,replace=False))]

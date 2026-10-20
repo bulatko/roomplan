@@ -128,15 +128,37 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual((door['kind'],door['sillHeight']),('door',0.))
         self.assertAlmostEqual(min(door['a'][1],door['b'][1]),.9,delta=.06);self.assertAlmostEqual(max(door['a'][1],door['b'][1]),1.8,delta=.06)
         self.assertAlmostEqual(door['height'],2.0,delta=.05)
-        self.assertTrue(any('Перегородки между помещениями: 1' in x and '16 см' in x for x in w));self.assertTrue(any('Проходы между помещениями найдены по облаку точек: 1' in x for x in w))
+        self.assertTrue(any('Перегородки между помещениями: 1' in x and '16 см' in x and 'по облаку точек: 1' in x for x in w))
+        self.assertIn('Все соседние помещения связаны проходами.',w)
 
     def test_solid_partition_or_no_cloud_gives_no_passage(self):
         result,cloud=two_rooms(doorway=False)
         for c in (cloud,None):
             p,w=result_to_project(result,c);validate_project(p)
             self.assertEqual(sum(1 for x in p['walls'] if x.get('partition')),1);self.assertEqual(p['openings'],[])
-            self.assertTrue(any('Проход между помещениями в облаке точек не найден' in x for x in w))
+            self.assertTrue(any(x.startswith('Без прохода к соседним помещениям: Помещение 1, Помещение 2') for x in w))
         p,_=result_to_project(synthetic_result());self.assertFalse(any(x.get('partition') for x in p['walls']))  # one room: nothing to merge
+
+    def test_detector_door_wins_over_cloud_passage(self):
+        result,cloud=two_rooms()
+        # The service found the same doorway as a door on room A's face (x=4, y 1.2..2.1).
+        result['doors']=[{'id':0,'wall':1,'kind':'door','corners':[[4,1.2,0],[4,2.1,0],[4,2.1,2.0],[4,1.2,2.0]],'score':.6,'src':'t'}]
+        p,w=result_to_project(result,cloud);validate_project(p)
+        part=next(x for x in p['walls'] if x.get('partition'))
+        self.assertEqual([(o['id'],o['wallId']) for o in p['openings']],[('door1',part['id'])])  # no duplicate passage
+        self.assertIn('Все соседние помещения связаны проходами.',w)
+
+    def test_one_face_bordering_two_rooms_gives_two_partitions(self):
+        # A (0..4 x 0..4) borders B (y 0..2) and C (y 2.16..4) along its face x=4; B|C share y≈2.08.
+        rects=[(0,4,0,4),(4.16,8,0,2),(4.16,8,2.16,4)]
+        polys=[[[x0,y0],[x1,y0],[x1,y1],[x0,y1]] for x0,x1,y0,y1 in rects]
+        walls=[dict(id=4*k+i,a=r[i],b=r[(i+1)%4],z_floor=0,z_ceil=2.7) for k,r in enumerate(polys) for i in range(4)]
+        p,w=result_to_project({'meta':{},'rooms':[{'poly':r} for r in polys],'walls':walls,'objects':[],'doors':[],'windows':[]})
+        validate_project(p)
+        parts=[x for x in p['walls'] if x.get('partition')];self.assertEqual(len(parts),3)
+        lengths=sorted(round(math.dist(x['a'],x['b'])-DEFAULT_THICKNESS,1) for x in parts)  # ends reach into the neighbours
+        self.assertEqual(lengths,[1.8,2.0,3.8])  # A|B, A|C (each <= 2 m) and B|C (3.84 m)
+        self.assertTrue(any('Без прохода к соседним помещениям: Помещение 1, Помещение 2, Помещение 3' in x for x in w))
 
     def test_rejects_results_without_walls(self):
         for bad in [{},{'walls':[]},{'walls':[{'a':[0,'x'],'b':[1,1]}]}]:
